@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP 三方向 ハンドシェイク 可視化</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #0f172a; }
+  .arrow-line {
+    position: absolute;
+    height: 2px;
+    transform-origin: left center;
+    transition: width 0.4s ease, opacity 0.3s;
+  }
+  .arrow-head {
+    position: absolute;
+    width: 0; height: 0;
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
+  }
+  .node-box {
+    width: 100px;
+    min-height: 60px;
+  }
+  .packet-badge {
+    animation: fadeInDown 0.3s ease;
+  }
+  @keyframes fadeInDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .step-row { transition: background 0.2s; }
+  .step-row.active { background: rgba(99,102,241,0.2); }
+</style>
+</head>
+<body class="min-h-screen text-slate-100 p-4">
+<div class="max-w-3xl mx-auto">
+  <h1 class="text-2xl font-bold text-cyan-400 mb-1">TCP 三方向 ハンドシェイク 可視化</h1>
+  <p class="text-slate-400 text-sm mb-4">SYN/SYN-ACK/ACK と FIN 終了手順をアニメーションで可視化</p>
+
+  <!-- Scenario selector -->
+  <div class="flex gap-3 mb-4">
+    <button onclick="setScenario('connect')" id="btnConnect" class="px-4 py-2 rounded-lg text-sm font-medium bg-cyan-700 text-white" aria-label="接続確立シナリオ">接続確立 (3-way)</button>
+    <button onclick="setScenario('close')" id="btnClose" class="px-4 py-2 rounded-lg text-sm font-medium bg-slate-700 text-slate-300" aria-label="接続終了シナリオ">接続終了 (4-way)</button>
+    <button onclick="resetScenario()" class="ml-auto px-4 py-2 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-300" aria-label="リセット">↺ リセット</button>
+  </div>
+
+  <!-- Sequence numbers -->
+  <div class="grid grid-cols-2 gap-3 mb-4">
+    <div class="bg-slate-800 rounded-lg p-3 flex gap-4">
+      <div>
+        <p class="text-xs text-slate-400">クライアント SEQ</p>
+        <p id="cliSeq" class="text-lg font-bold text-cyan-400 font-mono">—</p>
+      </div>
+      <div>
+        <p class="text-xs text-slate-400">クライアント ACK</p>
+        <p id="cliAck" class="text-lg font-bold text-green-400 font-mono">—</p>
+      </div>
+    </div>
+    <div class="bg-slate-800 rounded-lg p-3 flex gap-4">
+      <div>
+        <p class="text-xs text-slate-400">サーバー SEQ</p>
+        <p id="srvSeq" class="text-lg font-bold text-purple-400 font-mono">—</p>
+      </div>
+      <div>
+        <p class="text-xs text-slate-400">サーバー ACK</p>
+        <p id="srvAck" class="text-lg font-bold text-green-400 font-mono">—</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main visualization area -->
+  <div class="bg-slate-800 rounded-lg p-4 mb-4">
+    <!-- Node headers -->
+    <div class="flex justify-between mb-2">
+      <div class="node-box bg-cyan-900/40 border border-cyan-700 rounded-lg p-2 text-center">
+        <div class="text-xs text-cyan-300 font-bold">CLIENT</div>
+        <div id="cliState" class="text-xs text-slate-400 mt-1">CLOSED</div>
+      </div>
+      <div class="node-box bg-purple-900/40 border border-purple-700 rounded-lg p-2 text-center ml-auto">
+        <div class="text-xs text-purple-300 font-bold">SERVER</div>
+        <div id="srvState" class="text-xs text-slate-400 mt-1">LISTEN</div>
+      </div>
+    </div>
+
+    <!-- Arrow canvas area -->
+    <div id="arrowArea" class="relative bg-slate-900 rounded-lg" style="height:260px; overflow:hidden;">
+      <!-- Vertical lines for client/server -->
+      <div class="absolute" style="left:50px;top:0;bottom:0;width:1px;background:rgba(6,182,212,0.3)"></div>
+      <div class="absolute" style="right:50px;top:0;bottom:0;width:1px;background:rgba(168,85,247,0.3)"></div>
+      <!-- Arrows rendered by JS -->
+      <div id="arrows"></div>
+    </div>
+  </div>
+
+  <!-- Step description -->
+  <div id="stepDesc" class="bg-slate-800 rounded-lg p-4 mb-4 border-l-4 border-cyan-500">
+    <p class="text-sm text-slate-300">シナリオを選んで「次へ」ボタンで開始してください。</p>
+  </div>
+
+  <!-- Step list -->
+  <div id="stepList" class="bg-slate-800 rounded-lg p-3 mb-4">
+    <p class="text-xs text-slate-400 mb-2">ステップ一覧</p>
+    <div id="stepRows" class="space-y-0.5 text-xs font-mono"></div>
+  </div>
+
+  <!-- Controls -->
+  <div class="flex gap-3">
+    <button onclick="prevStep()" id="btnPrev" class="px-5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium" aria-label="前のステップ">← 前へ</button>
+    <button onclick="nextStep()" id="btnNext" class="px-5 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white font-medium" aria-label="次のステップ">次へ →</button>
+    <button onclick="autoPlay()" id="btnPlay" class="ml-auto px-5 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-medium" aria-label="自動再生">▶ 自動再生</button>
+  </div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+const CONNECT_STEPS = [
+  {
+    label: 'SYN', dir: 'c2s', color: '#06b6d4', flags: 'SYN',
+    seqLabel: 'seq=0', ackLabel: '',
+    cliState: 'SYN_SENT', srvState: 'LISTEN',
+    cliSeq: 0, cliAck: '—', srvSeq: '—', srvAck: '—',
+    desc: 'クライアントがSYNセグメントを送信。接続要求を開始。SEQ=0（初期シーケンス番号）。SYN=1はシーケンス番号を1消費する。',
+  },
+  {
+    label: 'SYN-ACK', dir: 's2c', color: '#a855f7', flags: 'SYN ACK',
+    seqLabel: 'seq=0, ack=1', ackLabel: '',
+    cliState: 'SYN_SENT', srvState: 'SYN_RECEIVED',
+    cliSeq: 0, cliAck: 1, srvSeq: 0, srvAck: 1,
+    desc: 'サーバーがSYN-ACKを返答。クライアントのSYNを確認（ACK=1）しつつ自身のSYNも送信（SEQ=0）。',
+  },
+  {
+    label: 'ACK', dir: 'c2s', color: '#22c55e', flags: 'ACK',
+    seqLabel: 'seq=1, ack=1', ackLabel: '',
+    cliState: 'ESTABLISHED', srvState: 'SYN_RECEIVED',
+    cliSeq: 1, cliAck: 1, srvSeq: 0, srvAck: 1,
+    desc: 'クライアントがACKを送信。サーバーのSYNを確認（ACK=1）。これで3-wayハンドシェイク完了。',
+  },
+  {
+    label: '接続確立 完了', dir: null, color: '#22c55e', flags: '',
+    seqLabel: '', ackLabel: '',
+    cliState: 'ESTABLISHED', srvState: 'ESTABLISHED',
+    cliSeq: 1, cliAck: 1, srvSeq: 1, srvAck: 1,
+    desc: '両端が ESTABLISHED 状態。データ転送が可能になりました。3-way ハンドシェイクはクライアントとサーバーが互いのISN（初期シーケンス番号）を交換し同期します。',
+  },
+];
+
+const CLOSE_STEPS = [
+  {
+    label: 'FIN', dir: 'c2s', color: '#f59e0b', flags: 'FIN ACK',
+    seqLabel: 'seq=100', ackLabel: '',
+    cliState: 'FIN_WAIT_1', srvState: 'ESTABLISHED',
+    cliSeq: 100, cliAck: '—', srvSeq: '—', srvAck: '—',
+    desc: 'クライアントが接続終了を要求。FINセグメントを送信（SEQ=100）。クライアントはこれ以上データを送らない。',
+  },
+  {
+    label: 'ACK', dir: 's2c', color: '#22c55e', flags: 'ACK',
+    seqLabel: 'ack=101', ackLabel: '',
+    cliState: 'FIN_WAIT_2', srvState: 'CLOSE_WAIT',
+    cliSeq: 100, cliAck: '—', srvSeq: 200, srvAck: 101,
+    desc: 'サーバーがACKを返送（ACK=101）。クライアントのFINを受信確認。サーバーはまだデータを送れる（半閉鎖状態）。',
+  },
+  {
+    label: 'FIN', dir: 's2c', color: '#f97316', flags: 'FIN ACK',
+    seqLabel: 'seq=200', ackLabel: '',
+    cliState: 'FIN_WAIT_2', srvState: 'LAST_ACK',
+    cliSeq: 100, cliAck: '—', srvSeq: 200, srvAck: 101,
+    desc: 'サーバーも接続終了を要求。FINセグメントを送信（SEQ=200）。サーバーもデータ送信を完了。',
+  },
+  {
+    label: 'ACK', dir: 'c2s', color: '#22c55e', flags: 'ACK',
+    seqLabel: 'ack=201', ackLabel: '',
+    cliState: 'TIME_WAIT', srvState: 'CLOSED',
+    cliSeq: 101, cliAck: 201, srvSeq: 200, srvAck: 101,
+    desc: 'クライアントが最終ACKを送信（ACK=201）。クライアントはTIME_WAIT状態（2MSL待機）後にCLOSED。接続が完全に終了。',
+  },
+];
+
+let scenario = 'connect';
+let steps = CONNECT_STEPS;
+let currentStep = -1;
+let autoTimer = null;
+
+function setScenario(s) {
+  stopAuto();
+  scenario = s;
+  steps = s === 'connect' ? CONNECT_STEPS : CLOSE_STEPS;
+  document.getElementById('btnConnect').className = 'px-4 py-2 rounded-lg text-sm font-medium ' + (s==='connect' ? 'bg-cyan-700 text-white' : 'bg-slate-700 text-slate-300');
+  document.getElementById('btnClose').className = 'px-4 py-2 rounded-lg text-sm font-medium ' + (s==='close' ? 'bg-cyan-700 text-white' : 'bg-slate-700 text-slate-300');
+  resetScenario();
+}
+
+function resetScenario() {
+  stopAuto();
+  currentStep = -1;
+  document.getElementById('arrows').innerHTML = '';
+  document.getElementById('cliState').textContent = scenario === 'connect' ? 'CLOSED' : 'ESTABLISHED';
+  document.getElementById('srvState').textContent = scenario === 'connect' ? 'LISTEN' : 'ESTABLISHED';
+  document.getElementById('cliSeq').textContent = '—';
+  document.getElementById('cliAck').textContent = '—';
+  document.getElementById('srvSeq').textContent = '—';
+  document.getElementById('srvAck').textContent = '—';
+  document.getElementById('stepDesc').innerHTML = '<p class="text-sm text-slate-300">「次へ」ボタンを押してシナリオを開始してください。</p>';
+  buildStepList();
+  document.getElementById('btnPrev').disabled = true;
+  document.getElementById('btnNext').disabled = false;
+  document.getElementById('btnPlay').textContent = '▶ 自動再生';
+}
+
+function buildStepList() {
+  const rows = document.getElementById('stepRows');
+  rows.innerHTML = steps.map((s, i) => `
+    <div class="step-row flex gap-2 items-center px-2 py-1 rounded" id="steprow-${i}">
+      <span class="text-slate-600 w-4 text-right">${escapeHtml(String(i+1))}.</span>
+      <span class="w-16 text-center px-1 rounded text-xs" style="background:${escapeHtml(s.color)}22;color:${escapeHtml(s.color)}">${escapeHtml(s.flags || s.label)}</span>
+      <span class="text-slate-500">${escapeHtml(s.dir === 'c2s' ? 'Client → Server' : s.dir === 's2c' ? 'Server → Client' : '両端確立')}</span>
+      <span class="text-slate-600 ml-auto">${escapeHtml(s.seqLabel)}</span>
+    </div>
+  `).join('');
+}
+
+function renderArrows() {
+  const area = document.getElementById('arrows');
+  area.innerHTML = '';
+  const areaEl = document.getElementById('arrowArea');
+  const W = areaEl.offsetWidth || 600;
+  const H = 260;
+  const leftX = 50;
+  const rightX = W - 50;
+  const stepH = Math.min(55, (H - 20) / steps.length);
+
+  for (let i = 0; i <= currentStep; i++) {
+    const s = steps[i];
+    if (!s.dir) {
+      // Done label
+      const y = 20 + i * stepH + stepH / 2;
+      const div = document.createElement('div');
+      div.style.cssText = `position:absolute;left:${leftX}px;top:${y-10}px;width:${rightX-leftX}px;text-align:center;font-size:12px;font-weight:bold;color:${s.color};`;
+      div.textContent = '=== 接続確立 ===';
+      area.appendChild(div);
+      continue;
+    }
+
+    const y = 20 + i * stepH + stepH / 2;
+    const fromX = s.dir === 'c2s' ? leftX : rightX;
+    const toX = s.dir === 'c2s' ? rightX : leftX;
+    const isRight = s.dir === 'c2s';
+
+    // Line
+    const lineW = Math.abs(toX - fromX);
+    const line = document.createElement('div');
+    line.style.cssText = `position:absolute;left:${Math.min(fromX,toX)}px;top:${y}px;width:${lineW}px;height:2px;background:${s.color};`;
+    area.appendChild(line);
+
+    // Arrowhead
+    const arrow = document.createElement('div');
+    if (isRight) {
+      arrow.style.cssText = `position:absolute;left:${toX-8}px;top:${y-6}px;width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-left:12px solid ${s.color};`;
+    } else {
+      arrow.style.cssText = `position:absolute;left:${toX}px;top:${y-6}px;width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-right:12px solid ${s.color};`;
+    }
+    area.appendChild(arrow);
+
+    // Label
+    const label = document.createElement('div');
+    const midX = (fromX + toX) / 2;
+    label.style.cssText = `position:absolute;left:${midX-40}px;top:${y-18}px;width:80px;text-align:center;font-size:11px;font-weight:bold;color:${s.color};`;
+    label.textContent = s.flags || s.label;
+    area.appendChild(label);
+
+    // Seq label
+    if (s.seqLabel) {
+      const seqLbl = document.createElement('div');
+      seqLbl.style.cssText = `position:absolute;left:${midX-50}px;top:${y+4}px;width:100px;text-align:center;font-size:9px;color:#64748b;`;
+      seqLbl.textContent = s.seqLabel;
+      area.appendChild(seqLbl);
+    }
+  }
+}
+
+function nextStep() {
+  if (currentStep >= steps.length - 1) return;
+  currentStep++;
+  const s = steps[currentStep];
+  document.getElementById('cliState').textContent = s.cliState;
+  document.getElementById('srvState').textContent = s.srvState;
+  document.getElementById('cliSeq').textContent = s.cliSeq !== undefined ? s.cliSeq : '—';
+  document.getElementById('cliAck').textContent = s.cliAck !== undefined ? s.cliAck : '—';
+  document.getElementById('srvSeq').textContent = s.srvSeq !== undefined ? s.srvSeq : '—';
+  document.getElementById('srvAck').textContent = s.srvAck !== undefined ? s.srvAck : '—';
+  document.getElementById('stepDesc').innerHTML = `
+    <p class="text-xs text-slate-400 mb-1">Step ${currentStep+1} / ${steps.length}: <span style="color:${escapeHtml(s.color)};font-weight:bold">${escapeHtml(s.flags || s.label)}</span></p>
+    <p class="text-sm text-slate-200">${escapeHtml(s.desc)}</p>
+  `;
+  renderArrows();
+  // Highlight step row
+  steps.forEach((_, i) => {
+    const r = document.getElementById('steprow-' + i);
+    if (r) r.className = 'step-row flex gap-2 items-center px-2 py-1 rounded' + (i === currentStep ? ' active' : '');
+  });
+  document.getElementById('btnPrev').disabled = currentStep <= 0;
+  document.getElementById('btnNext').disabled = currentStep >= steps.length - 1;
+  if (currentStep >= steps.length - 1) stopAuto();
+}
+
+function prevStep() {
+  if (currentStep <= 0) return;
+  currentStep--;
+  const s = steps[currentStep];
+  document.getElementById('cliState').textContent = s.cliState;
+  document.getElementById('srvState').textContent = s.srvState;
+  document.getElementById('cliSeq').textContent = s.cliSeq !== undefined ? s.cliSeq : '—';
+  document.getElementById('cliAck').textContent = s.cliAck !== undefined ? s.cliAck : '—';
+  document.getElementById('srvSeq').textContent = s.srvSeq !== undefined ? s.srvSeq : '—';
+  document.getElementById('srvAck').textContent = s.srvAck !== undefined ? s.srvAck : '—';
+  document.getElementById('stepDesc').innerHTML = `
+    <p class="text-xs text-slate-400 mb-1">Step ${currentStep+1} / ${steps.length}: <span style="color:${escapeHtml(s.color)};font-weight:bold">${escapeHtml(s.flags || s.label)}</span></p>
+    <p class="text-sm text-slate-200">${escapeHtml(s.desc)}</p>
+  `;
+  renderArrows();
+  steps.forEach((_, i) => {
+    const r = document.getElementById('steprow-' + i);
+    if (r) r.className = 'step-row flex gap-2 items-center px-2 py-1 rounded' + (i === currentStep ? ' active' : '');
+  });
+  document.getElementById('btnPrev').disabled = currentStep <= 0;
+  document.getElementById('btnNext').disabled = currentStep >= steps.length - 1;
+}
+
+function autoPlay() {
+  if (autoTimer) { stopAuto(); return; }
+  document.getElementById('btnPlay').textContent = '⏸ 停止';
+  autoTimer = setInterval(() => {
+    if (currentStep >= steps.length - 1) { stopAuto(); return; }
+    nextStep();
+  }, 1200);
+}
+
+function stopAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  document.getElementById('btnPlay').textContent = '▶ 自動再生';
+}
+
+setScenario('connect');
+</script>
+</body>
+</html>
